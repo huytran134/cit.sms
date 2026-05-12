@@ -1,0 +1,107 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* CiT EDU Brand Colors */
+    --background: 210 20% 98%;          /* Slate light */
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --primary: 239 84% 47%;             /* Deep Indigo */
+    --primary-foreground: 0 0% 100%;
+
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 47%;
+
+    --accent: 210 40% 94%;              /* Subtle slate hover (UI states) */
+    --accent-foreground: 222 47% 11%;
+
+    --success: 160 84% 39%;             /* Emerald (nghiệp vụ thành công) */
+    --success-foreground: 0 0% 100%;
+
+    --destructive: 0 84% 50%;           /* Crimson */
+    --destructive-foreground: 0 0% 100%;
+
+    --border: 214 32% 91%;
+    --input: 214 32% 91%;
+    --ring: 239 84% 47%;
+
+    --radius: 0.75rem;
+
+    /* Sidebar */
+    --sidebar-bg: 0 0% 100%;
+    --sidebar-border: 214 32% 91%;
+    --sidebar-width: 256px;
+  }
+}
+
+/* ===== DARK MODE (CiT EDU) ===== */
+.dark {
+  --background: 222 47% 9%;
+  --foreground: 210 40% 96%;
+
+  --card: 222 47% 12%;
+  --card-foreground: 210 40% 96%;
+
+  --popover: 222 47% 12%;
+  --popover-foreground: 210 40% 96%;
+
+  --primary: 239 84% 67%;           /* Lighter indigo on dark */
+  --primary-foreground: 0 0% 100%;
+
+  --secondary: 217 33% 17%;
+  --secondary-foreground: 210 40% 96%;
+
+  --muted: 217 33% 17%;
+  --muted-foreground: 215 20% 65%;
+
+  --accent: 217 33% 20%;
+  --accent-foreground: 210 40% 96%;
+
+  --success: 160 60% 48%;
+  --success-foreground: 0 0% 100%;
+
+  --destructive: 0 72% 55%;
+  --destructive-foreground: 0 0% 100%;
+
+  --border: 217 33% 17%;
+  --input: 217 33% 17%;
+  --ring: 239 84% 67%;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+
+  /* Override browser default link styles */
+  a {
+    @apply no-underline;
+  }
+}
+
+/* Scrollbar styling */
+@layer utilities {
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+}

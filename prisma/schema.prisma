@@ -1,0 +1,510 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ==========================================
+// 1. ENUMS (Các trạng thái cố định)
+// ==========================================
+
+enum SystemRole {
+  ADMIN
+  TEACHER
+  CLASS_LEADER
+}
+
+enum LeadStatus {
+  NEW
+  POTENTIAL
+  CONSULTED
+  CONVERTED  // Đã chuyển thành Học viên
+  DEAD       // Không tiếp tục
+}
+
+enum StudentStatus {
+  ASSIGNED   // Đã xếp lớp, chờ khai giảng
+  STUDYING
+  ON_HOLD    // Bảo lưu
+  GRADUATED
+  WITHDRAWN  // Rút lui
+  MERGED     // Đã gộp hồ sơ
+}
+
+enum ClassType {
+  REGULAR    // Lớp tư duy bình thường
+  MENTORING  // Lớp Mật Thất (1-1)
+}
+
+enum ClassStatus {
+  PLANNED
+  RECRUITING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum ClassFormat {
+  OFFLINE
+  ONLINE
+}
+
+enum FeeCycle {
+  COURSE     // Theo khóa (Lớp thường)
+  HALF_YEAR  // Theo 6 tháng (Mật Thất)
+  YEAR       // Theo năm (Mật Thất)
+}
+
+enum SessionStatus {
+  PLANNED
+  COMPLETED
+  CANCELLED
+}
+
+enum AttendanceStatus {
+  PRESENT
+  EXCUSED    // Vắng có phép (được học bù)
+  ABSENT     // Vắng không phép
+  MAKEUP     // Đi học bù từ lớp khác
+}
+
+enum DebtStatus {
+  CLEAR
+  OWING
+  OVERDUE
+  BAD_DEBT   // Nợ xấu không thu hồi được
+  ON_HOLD    // Bảo lưu
+}
+
+enum ClassMemberStatus {
+  ENROLLED
+  STUDYING
+  ON_HOLD
+  WITHDRAWN
+  GRADUATED
+}
+
+enum ReceiptStatus {
+  DRAFT
+  PENDING_APPROVAL
+  CONFIRMED  // IMMUABLE - Đã khóa sổ
+  CANCELLED  // IMMUABLE - Đã hủy (có lưu vết)
+}
+
+enum RefundStatus {
+  PENDING
+  APPROVED   // IMMUABLE
+}
+
+// ==========================================
+// 2. CORE MODELS (Bảng cốt lõi)
+// ==========================================
+
+model UserSystemRole {
+  userId String     @map("user_id")
+  roleId SystemRole @map("role_id")
+  user   User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   SystemRole
+
+  @@id([userId, roleId])
+  @@map("user_system_roles")
+}
+
+model User {
+  id            String   @id @default(cuid())
+  email         String   @unique
+  passwordHash  String   @map("password_hash")
+  fullName      String   @map("full_name")
+  phone         String   @unique // SĐT nhân sự
+  systemRoles   UserSystemRole[]
+  isActive      Boolean  @default(true) @map("is_active")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  // === CÁC QUAN HỆ NGƯỢC (BACK-RELATIONS) ===
+  
+  // Lead & Class
+  assignedLeads    Lead[]       @relation("LeadAssignee")
+  staffClasses     ClassStaff[] 
+  
+  // Finance (Phải dùng tên quan hệ vì có 2 FK)
+  createdReceipts  PaymentReceipt[] @relation("ReceiptCreator")
+  approvedReceipts PaymentReceipt[] @relation("ReceiptApprover")
+  approvedRefunds  RefundReceipt[]  @relation("RefundApprover")
+  
+  // Security & Audit
+  auditLogs        AuditLog[]
+  cccdAccessLogs   CccdAccessLog[]
+  mergeHistories   MergeHistory[]
+  
+  // AI
+  aiChatHistories  AiChatHistory[]
+
+  @@map("users")
+}
+
+// Tách riêng Lead và Student theo đúng yêu cầu
+model Lead {
+  id            String      @id @default(cuid())
+  fullName      String      @map("full_name")
+  phone         String      @unique // Kiểm tra trùng ngay khi nhập
+  email         String?
+  source        String?     // Nguồn: Facebook, Zalo, Giới thiệu...
+  notes         String?     @db.Text
+  status        LeadStatus  @default(NEW)
+  assignedToId  String?     @map("assigned_to_id") // CNL phụ trách (chỉ để note, không dùng chia自动 logic)
+  assignedTo    User?       @relation("LeadAssignee", fields: [assignedToId], references: [id])
+  
+  // Khi chuyển thành HV
+  convertedToStudentId String?    @map("converted_to_student_id")
+  convertedToStudent    Student?  @relation("LeadConversion", fields: [convertedToStudentId], references: [id])
+  
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  @@map("leads")
+}
+
+model Student {
+  id                String        @id @default(cuid())
+  studentCode       String?        @unique @map("student_code") // HV-2026-0001
+  fullName          String        @map("full_name")
+  phone             String        @unique // SĐT có thể thay đổi (Admin sửa)
+  email             String?
+  gender            String?
+  dateOfBirth       DateTime?     @map("date_of_birth")
+  workplace         String?
+  field             String?
+  currentAddress    String?       @map("current_address") @db.Text
+  
+  // Thông tin nhạy cảm (Mã hóa App Layer)
+  cccdCiphertext    String?       @map("cccd_ciphertext")
+  cccdIv            String?       @map("cccd_iv")
+  cccdTag           String?       @map("cccd_tag")
+  cccdBlindIndex    String?       @unique @map("cccd_blind_index") // HMAC-SHA256 để check trùng
+  cccdIssuedDate    DateTime?     @map("cccd_issued_date")
+  cccdIssuedPlace   String?       @map("cccd_issued_place")
+  
+  consentCccd       Boolean?      @default(false) @map("consent_cccd")
+  consentDate       DateTime?     @map("consent_date")
+  
+  // Nhóm D - Động lực (Từ Public Form)
+  knownFrom         String?       @map("known_from") @db.Text
+  referrerName      String?       @map("referrer_name")
+  reasonJoin        String?       @map("reason_join") @db.Text
+  goal3Years        String?       @map("goal_3_years") @db.Text
+  favoriteQuote     String?       @map("favorite_quote") @db.Text
+  achievements      String?       @db.Text
+  
+  source            String?       // Ghi nhận nguồn khi chuyển từ Lead hoặc tự đăng ký
+  internalNotes     String?       @map("internal_notes") @db.Text
+  
+  status            StudentStatus @default(ASSIGNED)
+  createdAt         DateTime      @default(now()) @map("created_at")
+  updatedAt         DateTime      @updatedAt @map("updated_at")
+
+  leads             Lead[]        @relation("LeadConversion")
+  enrollments       ClassMember[]
+  cccdAccessLogs    CccdAccessLog[]
+  attendances       Attendance[]
+  
+  mergeHistories    MergeHistory[] @relation("MergeTarget")
+  mergeFrom         MergeHistory[]  @relation("MergeSource")
+
+  @@map("students")
+}
+
+// ==========================================
+// 3. ACADEMIC MODELS (Học tập & Lớp)
+// ==========================================
+
+model Program {
+  id          String   @id @default(cuid())
+  code        String   @unique // TDTN, TDTD, MAT_THAT
+  name        String   @unique
+  branch      String   // "thinking" | "skill" | "mentoring"
+  tuitionFee  Decimal  @map("tuition_fee") @db.Decimal(15, 2) // Học phí chuẩn reference
+  feeCycle    FeeCycle @default(COURSE) @map("fee_cycle") // Dùng cho lớp Mật Thất
+  type        ClassType @default(REGULAR) @map("class_type")
+  description String?  @db.Text
+  isActive    Boolean  @default(true) @map("is_active")
+  
+  prerequisites ProgramPrerequisite[] @relation("ProgramRequirement")
+  requiredBy    ProgramPrerequisite[] @relation("ProgramPrerequisite")
+  classes       Class[]
+
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("programs")
+}
+
+model ProgramPrerequisite {
+  programId       String @map("program_id")
+  prerequisiteId  String @map("prerequisite_id")
+  
+  program        Program @relation("ProgramRequirement", fields: [programId], references: [id])
+  prerequisite   Program @relation("ProgramPrerequisite", fields: [prerequisiteId], references: [id])
+
+  @@id([programId, prerequisiteId])
+  @@map("program_prerequisites")
+}
+
+model Branch {
+  id        String   @id @default(cuid())
+  name      String
+  address   String?  @db.Text
+  isActive  Boolean  @default(true) @map("is_active")
+  classes   Class[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("branches")
+}
+
+model Class {
+  id           String       @id @default(cuid())
+  classCode    String       @unique @map("class_code") // TDTN-2026-01
+  name         String       // Tư duy Tài năng K15
+  programId    String       @map("program_id")
+  branchId     String       @map("branch_id")
+  tuitionFee   Decimal      @map("tuition_fee") @db.Decimal(15, 2) // Lấy từ Program, có thể override
+  format       ClassFormat  @default(OFFLINE)
+  capacityMax  Int          @map("capacity_max")
+  scheduleType String       @default("fixed") @map("schedule_type") // fixed / flexible
+  status       ClassStatus  @default(PLANNED)
+  startDate    DateTime?    @map("start_date")
+  endDate      DateTime?    @map("end_date")
+  cancelReason String?      @db.Text @map("cancel_reason")
+  graduatedCount Int        @default(0) @map("graduated_count")
+  
+  program      Program      @relation(fields: [programId], references: [id])
+  branch       Branch       @relation(fields: [branchId], references: [id])
+  staff        ClassStaff[]
+  members      ClassMember[]
+  sessions     ClassSession[]
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("classes")
+}
+
+model ClassStaff {
+  id         String   @id @default(cuid())
+  classId    String   @map("class_id")
+  userId     String   @map("user_id")
+  role       String   // 'teacher' | 'teaching_assistant' | 'class_leader'
+  
+  class      Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([classId, userId, role]) // 1 người chỉ giữ 1 vai trò trong 1 lớp
+  @@map("class_staff")
+}
+
+model ClassMember {
+  id                String      @id @default(cuid())
+  classId           String      @map("class_id")
+  studentId         String      @map("student_id")
+  
+  tuitionFeeActual  Decimal     @map("tuition_fee_actual") @db.Decimal(15, 2) // Học phí thực tế sau học bổng
+  debtStatus        DebtStatus  @default(CLEAR) @map("debt_status")
+  paymentDueDate    DateTime?   @map("payment_due_date") // Ngày hẹn trả nợ
+  
+  status            ClassMemberStatus @default(ENROLLED) // enrolled, studying, on_hold, withdrawn, graduated
+  
+  class             Class       @relation(fields: [classId], references: [id], onDelete: Cascade)
+  student           Student     @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  paymentReceipts   PaymentReceipt[]
+  refundReceipts    RefundReceipt[]
+
+  @@unique([classId, studentId]) // 1 học viên chỉ 1 lần trong 1 lớp
+  @@map("class_members")
+}
+
+model ClassSession {
+  id               String        @id @default(cuid())
+  classId          String        @map("class_id")
+  sessionDate      DateTime      @map("session_date")
+  sessionNumber    Int           @map("session_number")
+  topic            String?       @db.Text // Nội dung buổi học
+  status           SessionStatus @default(PLANNED)
+  confirmedCount   Int           @default(0) @map("confirmed_count") // CNL cập nhật
+  cancelReason     String?       @db.Text @map("cancel_reason")
+  
+  class            Class         @relation(fields: [classId], references: [id], onDelete: Cascade)
+  attendances      Attendance[]
+  feedbacks        Feedback[]
+
+  @@map("class_sessions")
+}
+
+model Attendance {
+  id                 String           @id @default(cuid())
+  sessionId          String           @map("session_id")
+  studentId          String           @map("student_id")
+  
+  status             AttendanceStatus @default(PRESENT)
+  makeupSessionId    String?          @map("makeup_session_id") // Nếu đi học bù, ghi nhận buổi học bù đó
+  
+  session            ClassSession     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  student            Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, studentId]) // 1 học viên chỉ 1 dòng điểm danh / 1 buổi
+  @@map("attendances")
+}
+
+model Feedback {
+  id              String   @id @default(cuid())
+  sessionId       String   @map("session_id")
+  studentId       String?  @map("student_id")
+  
+  lessonRating    Int      @map("lesson_rating") // 1-5
+  teacherRating   Int      @map("teacher_rating") // 1-5
+  taRating        Int      @map("ta_rating") // 1-5
+  comment         String?  @db.Text @map("comment")
+  
+  session         ClassSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  
+  @@map("feedbacks")
+}
+
+// ==========================================
+// 4. FINANCIAL MODELS (Tài chính - Khóa sổ)
+// ==========================================
+
+model PaymentReceipt {
+  id                String        @id @default(cuid())
+  receiptCode       String        @unique @map("receipt_code") // PT-2026-0001
+  classMemberId     String        @map("class_member_id")
+  amount            Decimal       @db.Decimal(15, 2) // Số tiền thực thu
+  paymentMethod     String        @map("payment_method") // 'cash' | 'transfer'
+  
+  // Thông tin đối soát ngân hàng (Yêu cầu mới)
+  senderName        String?       @map("sender_name") // Họ tên người chuyển khoản
+  senderBankAccount String?       @map("sender_bank_account") // STK/Ngân hàng
+  senderNote        String?       @map("sender_note") // Nội dung CK
+  
+  paymentDate       DateTime      @map("payment_date") // Ngày thu thực tế
+  status            ReceiptStatus @default(DRAFT)
+  
+  // Ai nhập (CNL/Admin)
+  createdByUserId   String        @map("created_by_user_id")
+  createdByUser     User          @relation("ReceiptCreator", fields: [createdByUserId], references: [id])
+  // Ai duyệt (Chỉ Admin)
+  approvedByUserId  String?       @map("approved_by_user_id")
+  approvedByUser    User?         @relation("ReceiptApprover", fields: [approvedByUserId], references: [id])
+  approvedAt        DateTime?     @map("approved_at")
+  
+  classMember       ClassMember   @relation(fields: [classMemberId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("payment_receipts")
+}
+
+model RefundReceipt {
+  id              String      @id @default(cuid())
+  receiptCode     String      @unique @map("receipt_code") // HOAN-2026-0001
+  classMemberId   String      @map("class_member_id")
+  
+  amount          Decimal      @db.Decimal(15, 2)
+  reason          String      @db.Text // Lý do hoàn
+  refundMethod    String      @map("refund_method") // 'cash' | 'transfer'
+  
+  status          RefundStatus @default(PENDING)
+  
+  approvedByUserId String     @map("approved_by_user_id")
+  approvedByUser   User       @relation("RefundApprover", fields: [approvedByUserId], references: [id])
+  approvedAt       DateTime?  @map("approved_at")
+  
+  classMember       ClassMember   @relation(fields: [classMemberId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  @@map("refund_receipts")
+}
+
+// ==========================================
+// 5. AUDIT & SECURITY (Logs & Bảo mật)
+// ==========================================
+
+model AuditLog {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  action        String   // VD: 'payment_receipt.confirm', 'class.kickoff'
+  entityType    String   @map("entity_type") // VD: 'PaymentReceipt', 'Class'
+  entityId      String   @map("entity_id")
+  details       String?  @db.Text // JSON stringify: { before: {...}, after: {...} }
+  
+  user          User     @relation(fields: [userId], references: [id])
+
+  createdAt     DateTime @default(now()) @map("created_at")
+  // KHÔNG CÓ updatedAt. Append-only.
+
+  @@map("audit_logs")
+}
+
+model CccdAccessLog {
+  id            String   @id @default(cuid())
+  userId        String   @map("user_id")
+  studentId     String   @map("student_id")
+  
+  user          User     @relation(fields: [userId], references: [id])
+  student       Student  @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("cccd_access_logs")
+}
+
+model MergeHistory {
+  id            String   @id @default(cuid())
+  primaryStudentId  String @map("primary_student_id") // Hồ sơ giữ lại
+  mergedStudentId   String @map("merged_student_id")  // Hồ sơ bị gộp vào
+  mergedByUserId    String @map("merged_by_user_id")
+  
+  primaryStudent    Student @relation("MergeTarget", fields: [primaryStudentId], references: [id])
+  mergedStudent     Student @relation("MergeSource", fields: [mergedStudentId], references: [id])
+  mergedByUser      User    @relation(fields: [mergedByUserId], references: [id])
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("merge_histories")
+}
+
+// ==========================================
+// 6. AI & DOCUMENTS (Hỗ trợ Gemini RAG)
+// ==========================================
+
+model Document {
+  id          String   @id @default(cuid())
+  fileName    String   @map("file_name")
+  fileType    String   @map("file_type") // 'pdf', 'docx'
+  fileUrl     String   @map("file_url") // Link Cloud storage
+  category    String   // 'lecture', 'regulation', 'faq'
+  
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("documents")
+}
+
+model AiChatHistory {
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  role        String   // 'user' | 'assistant'
+  content     String   @db.Text
+  
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  @@map("ai_chat_histories")
+}

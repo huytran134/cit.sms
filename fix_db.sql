@@ -1,0 +1,1 @@
+ALTER TABLE `feedbacks` MODIFY `student_id` DROP NOT NULL;
