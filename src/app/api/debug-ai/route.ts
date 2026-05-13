@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { OPENROUTER_BASE_URL, OPENROUTER_MODEL } from "@/lib/ai/gemini";
+import { OPENROUTER_BASE_URL, OPENROUTER_MODEL } from "@/lib/ai/openrouter";
 
 export async function GET() {
   // Step 1: Check API key presence
@@ -19,6 +19,8 @@ export async function GET() {
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
+        "HTTP-Referer": "https://sms.citedu.vn",
+        "X-Title": "CiT-SMS",
       },
       body: JSON.stringify({
         model: OPENROUTER_MODEL,

@@ -1,8 +1,18 @@
+import OpenAI from "openai";
 import { SystemRole, DebtStatus, ReceiptStatus } from "@prisma/client";
 import { prisma } from "@/lib/db";
 
 export const OPENROUTER_MODEL = "google/gemini-3.1-flash-lite";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
+
+export const openrouter = new OpenAI({
+  baseURL: OPENROUTER_BASE_URL,
+  apiKey: process.env.OPENROUTER_API_KEY,
+  defaultHeaders: {
+    "HTTP-Referer": "https://sms.citedu.vn",
+    "X-Title": "CiT-SMS",
+  },
+});
 
 // Phân tầng quyền hạn AI
 export type AiUserTier = "ADMIN" | "RESTRICTED";
@@ -89,7 +99,7 @@ export function countWords(text: string): number {
   return text.split(/\s+/).filter(Boolean).length;
 }
 
-// Cắt bớt lịch sử nếu tổng context vượt 6000 từ
+// Cắt bớt lịch sử nếu tổng context vượt 6000 từ (Rule 7 OOM Prevention)
 export function truncateHistory(
   history: { role: string; content: string }[],
   systemWords: number,
