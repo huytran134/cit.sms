@@ -1,10 +1,12 @@
 "use server";
 
-import * as XLSX from "xlsx";
+import ExcelJS from "exceljs";
 import { prisma } from "@/lib/db";
 import { getSessionForAction, assertRole } from "@/lib/auth/session";
 import { SystemRole, ReceiptStatus, StudentStatus, Prisma } from "@prisma/client";
 import { encryptCCCD, hashCCCDForBlindIndex } from "@/lib/crypto/cccd";
+
+const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
 
 export interface ImportResult {
   success: boolean;
@@ -14,17 +16,55 @@ export interface ImportResult {
   errors: string[];
 }
 
-// Tạo receipt code duy nhất cho phiếu thu import
 function generateImportReceiptCode(index: number): string {
   const timestamp = Date.now();
   const suffix = Math.random().toString(36).substring(2, 6).toUpperCase();
   return `PT-IMP-${timestamp}-${index}-${suffix}`;
 }
 
+// Chuyển CellValue (có thể là Date, RichText, Formula, null...) thành string
+function cellToString(value: ExcelJS.CellValue): string {
+  if (value === null || value === undefined) return "";
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object") {
+    if ("richText" in value) {
+      return (value as ExcelJS.CellRichTextValue).richText.map((r) => r.text).join("");
+    }
+    if ("result" in value) {
+      const result = (value as ExcelJS.CellFormulaValue).result;
+      return result instanceof Date ? result.toISOString() : String(result ?? "");
+    }
+    if ("error" in value) return "";
+  }
+  return String(value);
+}
+
+// Chuyển CellValue thành Date — ExcelJS trả Date object trực tiếp nếu ô định dạng ngày
+function cellToDate(value: ExcelJS.CellValue): Date | null {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  if (typeof value === "object" && "result" in value) {
+    const r = (value as ExcelJS.CellFormulaValue).result;
+    if (r instanceof Date) return r;
+  }
+  const parsed = new Date(cellToString(value));
+  return isNaN(parsed.getTime()) ? null : parsed;
+}
+
+// Đọc dòng header (row 1) và tạo map: tên cột → số cột (1-indexed)
+function buildColumnMap(ws: ExcelJS.Worksheet): Map<string, number> {
+  const map = new Map<string, number>();
+  ws.getRow(1).eachCell((cell, colNumber) => {
+    const header = cellToString(cell.value).trim();
+    if (header) map.set(header, colNumber);
+  });
+  return map;
+}
+
 /**
  * Server Action: Import học viên và lịch sử thu tiền từ file Excel.
  * Chỉ dành cho ADMIN. Hỗ trợ 2 sheet: "DanhSachHV" và "LichSuThu".
- * Tuân thủ quy tắc: CCCD mã hóa AES-256-GCM, Phiếu thu import -> CONFIRMED ngay lập tức.
+ * CCCD mã hóa AES-256-GCM. Phiếu thu import → CONFIRMED ngay lập tức.
  * Partial success: lỗi từng dòng không rollback toàn bộ.
  */
 export async function importStudentAndFinanceExcel(
@@ -53,8 +93,7 @@ export async function importStudentAndFinanceExcel(
       errors: [],
     };
   }
-
-  if (!file.name.endsWith(".xlsx") && !file.name.endsWith(".xls")) {
+  if (!file.name.endsWith(".xlsx")) {
     return {
       success: false,
       message: "File không đúng định dạng. Vui lòng chọn file .xlsx.",
@@ -63,12 +102,21 @@ export async function importStudentAndFinanceExcel(
       errors: [],
     };
   }
+  if (file.size > MAX_FILE_SIZE) {
+    return {
+      success: false,
+      message: "File quá lớn. Giới hạn tối đa là 10MB.",
+      successCount: 0,
+      errorCount: 0,
+      errors: [],
+    };
+  }
 
-  // 3. Đọc file Excel
-  let workbook: XLSX.WorkBook;
+  // 3. Đọc file Excel bằng ExcelJS (không có lỗ hổng Prototype Pollution như xlsx)
+  let workbook: ExcelJS.Workbook;
   try {
-    const buffer = await file.arrayBuffer();
-    workbook = XLSX.read(buffer, { type: "array", cellDates: true });
+    workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(await file.arrayBuffer());
   } catch {
     return {
       success: false,
@@ -86,40 +134,27 @@ export async function importStudentAndFinanceExcel(
   // SHEET 1: "DanhSachHV" — Import Học viên
   // Cột: HoTen | SoDienThoai | Email | CCCD | GioiTinh | NgaySinh | NoiLamViec | DiaChi
   // ============================================================
-  const studentSheet = workbook.Sheets["DanhSachHV"];
-  if (studentSheet) {
-    type StudentRow = {
-      HoTen?: string;
-      SoDienThoai?: string;
-      Email?: string;
-      CCCD?: string;
-      GioiTinh?: string;
-      NgaySinh?: string | Date;
-      NoiLamViec?: string;
-      DiaChi?: string;
-    };
+  const studentSheet = workbook.getWorksheet("DanhSachHV");
+  if (studentSheet && studentSheet.rowCount > 1) {
+    const colMap = buildColumnMap(studentSheet);
+    const dataRows = studentSheet.getRows(2, studentSheet.rowCount - 1) ?? [];
 
-    const rows = XLSX.utils.sheet_to_json<StudentRow>(studentSheet, {
-      defval: "",
-    });
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
+      const rowNum = i + 2;
 
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const rowNum = i + 2; // +2 vì header ở dòng 1, data bắt đầu từ dòng 2
-
-      const hoTen = String(row.HoTen || "").trim();
-      const soDienThoai = String(row.SoDienThoai || "").trim();
-      const email = String(row.Email || "").trim() || null;
-      const cccd = String(row.CCCD || "").trim();
-      const gioiTinh = String(row.GioiTinh || "").trim() || null;
-      const ngaySinhRaw = row.NgaySinh;
-      const noiLamViec = String(row.NoiLamViec || "").trim() || null;
-      const diaChi = String(row.DiaChi || "").trim() || null;
+      const hoTen = cellToString(row.getCell(colMap.get("HoTen") ?? 1).value).trim();
+      const soDienThoai = cellToString(row.getCell(colMap.get("SoDienThoai") ?? 2).value).trim();
+      const email = cellToString(row.getCell(colMap.get("Email") ?? 3).value).trim() || null;
+      const cccd = cellToString(row.getCell(colMap.get("CCCD") ?? 4).value).trim();
+      const gioiTinh = cellToString(row.getCell(colMap.get("GioiTinh") ?? 5).value).trim() || null;
+      const ngaySinh = cellToDate(row.getCell(colMap.get("NgaySinh") ?? 6).value);
+      const noiLamViec = cellToString(row.getCell(colMap.get("NoiLamViec") ?? 7).value).trim() || null;
+      const diaChi = cellToString(row.getCell(colMap.get("DiaChi") ?? 8).value).trim() || null;
 
       // Bỏ qua dòng trống hoàn toàn
       if (!hoTen && !soDienThoai) continue;
 
-      // Validate bắt buộc
       if (!hoTen) {
         errors.push(`[DanhSachHV] Dòng ${rowNum}: Thiếu họ tên học viên.`);
         continue;
@@ -146,8 +181,6 @@ export async function importStudentAndFinanceExcel(
         let cccdFields: Record<string, unknown> = {};
         if (cccd) {
           const blindIndex = hashCCCDForBlindIndex(cccd);
-
-          // Check trùng Blind Index
           const existingCccd = await prisma.student.findUnique({
             where: { cccdBlindIndex: blindIndex },
             select: { id: true },
@@ -158,8 +191,6 @@ export async function importStudentAndFinanceExcel(
             );
             continue;
           }
-
-          // Mã hóa AES-256-GCM
           const { ciphertext, iv, tag } = encryptCCCD(cccd);
           cccdFields = {
             cccdCiphertext: ciphertext,
@@ -171,22 +202,13 @@ export async function importStudentAndFinanceExcel(
           };
         }
 
-        // Parse ngày sinh
-        let dateOfBirth: Date | null = null;
-        if (ngaySinhRaw) {
-          const parsed = new Date(ngaySinhRaw as string);
-          if (!isNaN(parsed.getTime())) {
-            dateOfBirth = parsed;
-          }
-        }
-
         await prisma.student.create({
           data: {
             fullName: hoTen,
             phone: soDienThoai,
             email,
             gender: gioiTinh,
-            dateOfBirth,
+            dateOfBirth: ngaySinh,
             workplace: noiLamViec,
             currentAddress: diaChi,
             status: StudentStatus.ASSIGNED,
@@ -195,7 +217,6 @@ export async function importStudentAndFinanceExcel(
             ...cccdFields,
           },
         });
-
         successCount++;
       } catch (err: unknown) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
@@ -214,38 +235,30 @@ export async function importStudentAndFinanceExcel(
   // ============================================================
   // SHEET 2: "LichSuThu" — Import Lịch sử Thu tiền
   // Cột: SoDienThoai | MaLop | SoTien | PhuongThucTT | NgayThu | TenNguoiChuyen
-  // Tất cả phiếu import -> Status: CONFIRMED (đã thu tiền ngoài đời)
+  // Tất cả phiếu import → Status: CONFIRMED (đã thu tiền ngoài đời)
   // ============================================================
-  const financeSheet = workbook.Sheets["LichSuThu"];
-  if (financeSheet) {
-    type FinanceRow = {
-      SoDienThoai?: string;
-      MaLop?: string;
-      SoTien?: number | string;
-      PhuongThucTT?: string;
-      NgayThu?: string | Date;
-      TenNguoiChuyen?: string;
-    };
+  const financeSheet = workbook.getWorksheet("LichSuThu");
+  if (financeSheet && financeSheet.rowCount > 1) {
+    const colMap = buildColumnMap(financeSheet);
+    const dataRows = financeSheet.getRows(2, financeSheet.rowCount - 1) ?? [];
 
-    const rows = XLSX.utils.sheet_to_json<FinanceRow>(financeSheet, {
-      defval: "",
-    });
-
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
+    for (let i = 0; i < dataRows.length; i++) {
+      const row = dataRows[i];
       const rowNum = i + 2;
 
-      const soDienThoai = String(row.SoDienThoai || "").trim();
-      const maLop = String(row.MaLop || "").trim();
-      const soTien = Number(row.SoTien);
-      const phuongThucTT = String(row.PhuongThucTT || "cash").trim();
-      const ngayThuRaw = row.NgayThu;
-      const tenNguoiChuyen = String(row.TenNguoiChuyen || "").trim() || null;
+      const soDienThoai = cellToString(row.getCell(colMap.get("SoDienThoai") ?? 1).value).trim();
+      const maLop = cellToString(row.getCell(colMap.get("MaLop") ?? 2).value).trim();
+      const soTienRaw = row.getCell(colMap.get("SoTien") ?? 3).value;
+      const soTien = typeof soTienRaw === "number" ? soTienRaw : Number(cellToString(soTienRaw));
+      const phuongThucTT =
+        cellToString(row.getCell(colMap.get("PhuongThucTT") ?? 4).value).trim() || "cash";
+      const ngayThu = cellToDate(row.getCell(colMap.get("NgayThu") ?? 5).value);
+      const tenNguoiChuyen =
+        cellToString(row.getCell(colMap.get("TenNguoiChuyen") ?? 6).value).trim() || null;
 
       // Bỏ qua dòng trống
       if (!soDienThoai && !maLop) continue;
 
-      // Validate
       if (!soDienThoai) {
         errors.push(`[LichSuThu] Dòng ${rowNum}: Thiếu số điện thoại học viên.`);
         continue;
@@ -258,19 +271,12 @@ export async function importStudentAndFinanceExcel(
         errors.push(`[LichSuThu] Dòng ${rowNum}: Số tiền không hợp lệ hoặc bằng 0.`);
         continue;
       }
-      if (!ngayThuRaw) {
-        errors.push(`[LichSuThu] Dòng ${rowNum}: Thiếu ngày thu.`);
-        continue;
-      }
-
-      const ngayThu = new Date(ngayThuRaw as string);
-      if (isNaN(ngayThu.getTime())) {
-        errors.push(`[LichSuThu] Dòng ${rowNum}: Ngày thu không hợp lệ.`);
+      if (!ngayThu) {
+        errors.push(`[LichSuThu] Dòng ${rowNum}: Thiếu ngày thu hoặc ngày thu không hợp lệ.`);
         continue;
       }
 
       try {
-        // Tìm học viên theo SĐT
         const student = await prisma.student.findUnique({
           where: { phone: soDienThoai },
           select: { id: true, fullName: true },
@@ -282,7 +288,6 @@ export async function importStudentAndFinanceExcel(
           continue;
         }
 
-        // Tìm lớp theo mã lớp
         const cls = await prisma.class.findUnique({
           where: { classCode: maLop },
           select: { id: true },
@@ -294,11 +299,8 @@ export async function importStudentAndFinanceExcel(
           continue;
         }
 
-        // Tìm ClassMember (học viên phải có trong lớp)
         const classMember = await prisma.classMember.findUnique({
-          where: {
-            classId_studentId: { classId: cls.id, studentId: student.id },
-          },
+          where: { classId_studentId: { classId: cls.id, studentId: student.id } },
           select: { id: true },
         });
         if (!classMember) {
@@ -309,7 +311,7 @@ export async function importStudentAndFinanceExcel(
         }
 
         // Tạo phiếu thu CONFIRMED trong transaction + ghi AuditLog
-        // Rule 3.1: Phiếu import lịch sử -> CONFIRMED ngay lập tức (đã thu thực tế)
+        // Rule 3.1: Phiếu import lịch sử → CONFIRMED ngay lập tức (đã thu thực tế)
         await prisma.$transaction(async (tx) => {
           const receipt = await tx.paymentReceipt.create({
             data: {
@@ -325,8 +327,6 @@ export async function importStudentAndFinanceExcel(
               approvedAt: new Date(),
             },
           });
-
-          // Ghi AuditLog bắt buộc cho mọi phiếu import
           await tx.auditLog.create({
             data: {
               userId: session.user.id,
@@ -341,7 +341,6 @@ export async function importStudentAndFinanceExcel(
             },
           });
         });
-
         successCount++;
       } catch (err: unknown) {
         if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === "P2002") {
