@@ -1,7 +1,7 @@
 import { SystemRole, DebtStatus, ReceiptStatus } from "@prisma/client";
 import { prisma } from "@/lib/db";
 
-export const OPENROUTER_MODEL = "google/gemini-2.0-flash";
+export const OPENROUTER_MODEL = "google/gemini-3.1-flash-lite";
 export const OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1";
 
 // Phân tầng quyền hạn AI
