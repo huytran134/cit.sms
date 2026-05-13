@@ -1,40 +1,58 @@
 import { NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import { OPENROUTER_BASE_URL, OPENROUTER_MODEL } from "@/lib/ai/gemini";
 
 export async function GET() {
   // Step 1: Check API key presence
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) {
     return NextResponse.json({
       ok: false,
       step: "env_check",
-      error: "GEMINI_API_KEY is not set (undefined or empty)",
+      error: "OPENROUTER_API_KEY is not set (undefined or empty)",
     });
   }
 
-  // Step 2: Try a minimal Gemini call
+  // Step 2: Try a minimal OpenRouter call
   try {
-    const genAI = new GoogleGenerativeAI(apiKey);
-    const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash" });
-    const result = await model.generateContent("Xin chào");
-    const text = result.response.text();
+    const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: OPENROUTER_MODEL,
+        messages: [{ role: "user", content: "Xin chào" }],
+      }),
+    });
 
+    const data = await res.json();
+
+    if (!res.ok) {
+      return NextResponse.json({
+        ok: false,
+        step: "openrouter_call",
+        status: res.status,
+        error: data?.error?.message ?? JSON.stringify(data),
+        keyPrefix: `${apiKey.slice(0, 10)}…`,
+      });
+    }
+
+    const text: string = data.choices?.[0]?.message?.content ?? "(no content)";
     return NextResponse.json({
       ok: true,
-      step: "gemini_call",
+      step: "openrouter_call",
+      model: OPENROUTER_MODEL,
       response: text.slice(0, 200),
-      keyPrefix: `${apiKey.slice(0, 8)}…`,
+      keyPrefix: `${apiKey.slice(0, 10)}…`,
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    const stack = err instanceof Error ? err.stack?.split("\n").slice(0, 5).join(" | ") : undefined;
-
     return NextResponse.json({
       ok: false,
-      step: "gemini_call",
+      step: "openrouter_call",
       error: message,
-      stack,
-      keyPrefix: `${apiKey.slice(0, 8)}…`,
+      keyPrefix: `${apiKey.slice(0, 10)}…`,
     });
   }
 }
