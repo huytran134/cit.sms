@@ -63,7 +63,7 @@
   --secondary-foreground: 210 40% 96%;
 
   --muted: 217 33% 17%;
-  --muted-foreground: 215 20% 65%;
+  --muted-foreground: 215 20% 75%;
 
   --accent: 217 33% 20%;
   --accent-foreground: 210 40% 96%;
@@ -93,6 +93,21 @@
   a {
     @apply no-underline;
   }
+}
+
+/* ===== DARK MODE: Hardcoded slate text overrides =====
+ * Tailwind's text-slate-{700,800,900} are near-black — invisible on dark card bg.
+ * These overrides flip them to readable light values without touching 30+ files.
+ */
+.dark .text-slate-900,
+.dark .text-slate-800 {
+  color: rgb(241 245 249 / var(--tw-text-opacity, 1)); /* → slate-100 */
+}
+.dark .text-slate-700 {
+  color: rgb(226 232 240 / var(--tw-text-opacity, 1)); /* → slate-200 */
+}
+.dark .text-slate-400 {
+  color: rgb(203 213 225 / var(--tw-text-opacity, 1)); /* → slate-300 */
 }
 
 /* Scrollbar styling */
